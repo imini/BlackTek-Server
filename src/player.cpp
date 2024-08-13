@@ -16,6 +16,7 @@
 #include "scheduler.h"
 #include "weapons.h"
 #include "rewardchest.h"
+#include "player.h"
 
 extern ConfigManager g_config;
 extern Game g_game;
@@ -1987,8 +1988,7 @@ BlockType_t Player::blockHit(Creature* attacker, CombatType_t combatType, int32_
 	}
 
 	if (!ignoreResistances) {
-		Reflect reflect;
-
+		
 		size_t combatIndex = combatTypeToIndex(combatType);
 		for (int32_t slot = CONST_SLOT_FIRST; slot <= CONST_SLOT_LAST; ++slot) {
 			if (!isItemAbilityEnabled(static_cast<slots_t>(slot))) {
@@ -2006,32 +2006,12 @@ BlockType_t Player::blockHit(Creature* attacker, CombatType_t combatType, int32_
 					damage = 0;
 					return BLOCK_ARMOR;
 				}
-
 				continue;
 			}
 
-			const int16_t& absorbPercent = it.abilities->absorbPercent[combatIndex];
-			if (absorbPercent != 0) {
-				damage -= std::round(damage * (absorbPercent / 100.));
-
-				uint16_t charges = item->getCharges();
-				if (charges != 0) {
-					g_game.transformItem(item, item->getID(), charges - 1);
-				}
-			}
-
-			reflect += item->getReflect(combatType);
-
-			if (field) {
-				const int16_t& fieldAbsorbPercent = it.abilities->fieldAbsorbPercent[combatIndex];
-				if (fieldAbsorbPercent != 0) {
-					damage -= std::round(damage * (fieldAbsorbPercent / 100.));
-
-					uint16_t charges = item->getCharges();
-					if (charges != 0) {
-						g_game.transformItem(item, item->getID(), charges - 1);
-					}
-				}
+			uint16_t charges = item->getCharges();
+			if (charges != 0) {
+				g_game.transformItem(item, item->getID(), charges - 1);
 			}
 
 			if (item->hasImbuements()) {
@@ -2070,17 +2050,7 @@ BlockType_t Player::blockHit(Creature* attacker, CombatType_t combatType, int32_
 					}
 				}
 			}
-
 		}
-
-		if (attacker && reflect.chance > 0 && reflect.percent != 0 && uniform_random(1, 100) <= reflect.chance) {
-			CombatDamage reflectDamage;
-			reflectDamage.primary.type = combatType;
-			reflectDamage.primary.value = -std::round(damage * (reflect.percent / 100.));
-			reflectDamage.origin = ORIGIN_REFLECT;
-			g_game.combatChangeHealth(this, attacker, reflectDamage);
-		}
-
 	}
 
 	if (damage <= 0) {
@@ -3863,6 +3833,15 @@ void Player::changeSoul(int32_t soulChange)
 	sendStats();
 }
 
+void Player::changeStamina(int32_t amount)
+{
+	if (amount > 0) {
+		staminaMinutes += std::min<int32_t>(amount, 2520 - staminaMinutes);
+	} else {
+		staminaMinutes = std::max<int32_t>(0, staminaMinutes + amount);
+	}
+}
+
 bool Player::canWear(uint32_t lookType, uint8_t addons) const
 {
 	if (group->access) {
@@ -4725,6 +4704,16 @@ size_t Player::getMaxDepotItems() const
 	return g_config.getNumber(isPremium() ? ConfigManager::DEPOT_PREMIUM_LIMIT : ConfigManager::DEPOT_FREE_LIMIT);
 }
 
+void Player::addAugment(std::shared_ptr<Augment>& augment)
+{
+	augments.push_back(augment);
+}
+
+void Player::removeAugment(std::shared_ptr<Augment>& augment)
+{
+	augments.erase(std::remove(augments.begin(), augments.end(), augment), augments.end());
+}
+
 std::forward_list<Condition*> Player::getMuteConditions() const
 {
 	std::forward_list<Condition*> muteConditions;
@@ -4982,6 +4971,199 @@ void Player::removeImbuementEffect(std::shared_ptr<Imbuement> imbue) {
 	sendStats();
 }
 
+std::vector<std::shared_ptr<DamageModifier>> Player::getAttackModifiers(uint8_t modType)
+{
+	auto list = std::vector<std::shared_ptr<DamageModifier>>();
+	for (auto aug : augments) {
+		for (auto mod : aug->getAttackModifiers(modType)) {
+			list.emplace_back(mod);
+		}
+	}
+	return list;
+}
+
+std::vector<std::shared_ptr<DamageModifier>> Player::getDefenseModifiers(uint8_t modType)
+{
+	auto list = std::vector<std::shared_ptr<DamageModifier>>();
+	for (auto aug : augments) {
+		for (auto mod : aug->getDefenseModifiers(modType)) {
+			list.emplace_back(mod);
+		}
+	}
+	return list;
+}
+
+std::vector<std::pair<uint8_t, uint8_t>> Player::getAttackModifierTotals(const CombatType_t damageType, const CombatOrigin originType, const std::string& monsterName, const uint8_t race, const bool isBoss) {
+	std::vector<std::pair<uint8_t, uint8_t>> modifierTable;
+	modifierTable.reserve(Augments::AttackModCount);
+	for (auto modifierType : Augments::AttackCombatList) {
+		auto modifierList = getAttackModifiers(modifierType);
+		auto percentTotal = 0;
+		auto flatTotal = 0;
+		if (modifierList.size() > 0) {
+			for (const auto& mod : modifierList) {
+				if (mod->appliesToAllDamage()
+					|| mod->getDamageType() == damageType
+					|| mod->isOriginBased() && mod->getOriginType() == originType
+					|| mod->isMonsterBased() && mod->getMonsterName() == monsterName
+					|| mod->isBossBased() && isBoss && mod->getMonsterName() == monsterName
+					|| mod->isRaceBased() && mod->getRaceType() == race ) {
+
+					if (mod->isFlatValue() && mod->getChance() == 0 || mod->isFlatValue() && mod->getChance() == 100) {
+						flatTotal += mod->getValue();
+						continue;
+					} else if (mod->isFlatValue()) {
+						if (mod->getChance() >= uniform_random(1, 100)) {
+							flatTotal += mod->getValue();
+							continue;
+						}
+					}
+
+					if (mod->isPercent() && mod->getChance() == 0 || mod->isPercent() && mod->getChance() == 100) {
+						percentTotal += mod->getValue();
+						continue;
+					} else if (mod->isPercent()) {
+						if (mod->getChance() >= uniform_random(1, 100)) {
+							percentTotal += mod->getValue();
+							continue;
+						}
+					}
+				}
+				modifierTable[modifierType] = { percentTotal, flatTotal };
+			}
+		}
+	}
+	return modifierTable;
+}
+
+
+std::vector<std::pair<uint8_t, uint8_t>> Player::getDefenseModifierTotals(const CombatType_t damageType, const CombatOrigin originType, const std::string& monsterName, const uint8_t race, const bool isBoss) {
+	std::vector<std::pair<uint8_t, uint8_t>> modifierTable;
+	modifierTable.reserve(Augments::DefenseModCount);
+	for (auto modifierType : Augments::DefenseCombatList) {
+		auto modifierList = getDefenseModifiers(modifierType);
+		auto percentTotal = 0;
+		auto flatTotal = 0;
+		if (modifierList.size() > 0) {
+			for (const auto& mod : modifierList) {
+				if (mod->appliesToAllDamage()
+					|| mod->getDamageType() == damageType
+					|| mod->isOriginBased() && mod->getOriginType() == originType
+					|| mod->isMonsterBased() && mod->getMonsterName() == monsterName
+					|| mod->isBossBased() && isBoss && mod->getMonsterName() == monsterName
+					|| mod->isRaceBased() && mod->getRaceType() == race) {
+
+					if (mod->isFlatValue() && mod->getChance() == 0 || mod->isFlatValue() && mod->getChance() == 100) {
+						flatTotal += mod->getValue();
+						continue;
+					} else if (mod->isFlatValue()) {
+						if (mod->getChance() >= uniform_random(1, 100)) {
+							flatTotal += mod->getValue();
+							continue;
+						}
+					}
+
+					if (mod->isPercent() && mod->getChance() == 0 || mod->isPercent() && mod->getChance() == 100) {
+						percentTotal += mod->getValue();
+						continue;
+					} else if (mod->isPercent()) {
+						if (mod->getChance() >= uniform_random(1, 100)) {
+							percentTotal += mod->getValue();
+							continue;
+						}
+					}
+				}
+				modifierTable[modifierType] = { percentTotal, flatTotal };
+			}
+		}
+	}
+	return modifierTable;
+}
+
+// Convert to a static array (will require clearing it after every call).
+std::vector<std::pair<uint8_t, uint8_t>> Player::getConversionTotals(const CombatType_t damageType, const CombatOrigin originType) {
+	// There are only 13 possible damage types
+	std::vector<std::pair<uint8_t, uint8_t>> conversionTable(13);
+
+	auto modifierList = getAttackModifiers(ATTACK_MODIFIER_CONVERSION);
+
+	if (!modifierList.empty()) {
+		for (const auto& mod : modifierList) {
+
+			auto percentTotal = 0;
+			auto flatTotal = 0;
+			const auto& conversionType = getCombatU8Value(mod->conversionType());
+
+			if (mod->appliesToAllDamage()
+				|| mod->getDamageType() == damageType
+				|| (mod->isOriginBased() && mod->getOriginType() == originType)) {
+
+				if (mod->isFlatValue()) {
+					if (mod->getChance() == 0 || mod->getChance() == 100 || mod->getChance() >= uniform_random(1, 100)) {
+						flatTotal += mod->getValue();
+						continue;
+					}
+					continue;
+				}
+
+				if (mod->isPercent()) {
+					if (mod->getChance() == 0 || mod->getChance() == 100 || mod->getChance() >= uniform_random(1, 100)) {
+						percentTotal += mod->getValue();
+						continue;
+					}
+					continue;
+				}
+
+				conversionTable[conversionType].first += percentTotal;
+				conversionTable[conversionType].second += flatTotal;
+			}
+		}
+	}
+	return conversionTable;
+}
+
+// Convert to a static array (will require clearing it after every call).
+std::vector<std::pair<uint8_t, uint8_t>> Player::getReformTotals(const CombatType_t damageType, const CombatOrigin originType) {
+	// There are only 13 possible damage types
+	std::vector<std::pair<uint8_t, uint8_t>> reformTable(13);
+
+	auto modifierList = getDefenseModifiers(DEFENSE_MODIFIER_REFORM);
+
+	if (!modifierList.empty()) {
+		for (const auto& mod : modifierList) {
+
+			auto percentTotal = 0;
+			auto flatTotal = 0;
+			const auto& conversionType = getCombatU8Value(mod->conversionType());
+
+			if (mod->appliesToAllDamage()
+				|| mod->getDamageType() == damageType
+				|| (mod->isOriginBased() && mod->getOriginType() == originType)) {
+
+				if (mod->isFlatValue()) {
+					if (mod->getChance() == 0 || mod->getChance() == 100 || mod->getChance() >= uniform_random(1, 100)) {
+						flatTotal += mod->getValue();
+						continue;
+					}
+					continue;
+				}
+
+				if (mod->isPercent()) {
+					if (mod->getChance() == 0 || mod->getChance() == 100 || mod->getChance() >= uniform_random(1, 100)) {
+						percentTotal += mod->getValue();
+						continue;
+					}
+					continue;
+				}
+
+				reformTable[conversionType].first += percentTotal;
+				reformTable[conversionType].second += flatTotal;
+			}
+		}
+	}
+	return reformTable;
+}
+
 void Player::addImbuementEffect(std::shared_ptr<Imbuement> imbue) {
 
 
@@ -5043,4 +5225,49 @@ void Player::addImbuementEffect(std::shared_ptr<Imbuement> imbue) {
 	}
 	sendSkills();
 	sendStats();
+}
+
+// To-do : Add distance effects to the following three methods
+void Player::reflectDamage(Creature& target, CombatType_t dmgType, uint8_t amount) {
+	auto reflect = CombatDamage{};
+	reflect.primary.type = dmgType;
+	reflect.primary.value = amount;
+	reflect.origin = ORIGIN_AUGMENT;
+	g_game.combatChangeHealth(this, &target, reflect);
+}
+
+void Player::deflectDamage(CombatType_t dmgType, uint8_t amount) {
+	auto deflect = CombatDamage{};
+	deflect.primary.type = dmgType;
+	deflect.origin = ORIGIN_AUGMENT;
+	SpectatorVec spectators;
+	// To-do : Make ranges configurable here
+	g_game.map.getSpectators(spectators, position, false, false, 3, 3, 3, 3);
+	uint8_t targetNumber = spectators.size();
+	deflect.primary.value = std::round( amount / targetNumber );
+	for (auto& target : spectators) {
+		// I think skipping combat::doDamage here allows us
+		// to keep from looping over the same damage over and over
+		g_game.combatChangeHealth(this, target, deflect);
+	}
+}
+
+void Player::ricochetDamage(CombatType_t dmgType, uint8_t amount) {
+
+	auto ricochet = CombatDamage{};
+	ricochet.primary.type = dmgType;
+	ricochet.primary.value += amount;
+	ricochet.origin = ORIGIN_AUGMENT;
+
+	SpectatorVec spectators;
+	// To-do : Make ranges configurable here
+	g_game.map.getSpectators(spectators, position, false, false, 5, 5, 5, 5);
+	
+	auto target = spectators[uniform_random(0, spectators.size())];
+
+	// I think skipping combat::doDamage here allows us
+	// to keep from looping over the same damage over and over
+	if (target) {
+		g_game.combatChangeHealth(this, target, ricochet);
+	}
 }

@@ -106,6 +106,9 @@ class Combat
 		static void doTargetCombat(Creature* caster, Creature* target, CombatDamage& damage, const CombatParams& params);
 		static void doAreaCombat(Creature* caster, const Position& position, const AreaCombat* area, CombatDamage& damage, const CombatParams& params);
 
+		static void applyDamageIncreaseModifier(uint8_t modifierType, CombatDamage& damage, uint8_t percentValue, uint8_t flatValue);
+		static void applyDamageReductionModifier(uint8_t modifierType, CombatDamage& damage, Player& damageTarget, Creature& attacker, uint8_t percentValue, uint8_t flatValue);
+
 		bool setCallback(CallBackParam_t key);
 		CallBack* getCallback(CallBackParam_t key);
 

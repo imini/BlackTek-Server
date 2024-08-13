@@ -21,8 +21,10 @@
 #include "mounts.h"
 #include "storeinbox.h"
 #include "rewardchest.h"
+#include "augments.h"
 
 #include <bitset>
+#include "augment.h"
 
 class House;
 class NetworkMessage;
@@ -598,6 +600,7 @@ class Player final : public Creature, public Cylinder
 		void changeHealth(int32_t healthChange, bool sendHealthChange = true) override;
 		void changeMana(int32_t manaChange);
 		void changeSoul(int32_t soulChange);
+		void changeStamina(int32_t amount);
 
 		bool isPzLocked() const {
 			return pzLocked;
@@ -1182,10 +1185,26 @@ class Player final : public Creature, public Cylinder
 		bool hasLearnedInstantSpell(const std::string& spellName) const;
 
 		void updateRegeneration();
+
 		void addItemImbuements(Item* item);
 		void removeItemImbuements(Item* item);
 		void addImbuementEffect(std::shared_ptr<Imbuement> imbue);
 		void removeImbuementEffect(std::shared_ptr<Imbuement> imbue);
+
+		std::vector<std::shared_ptr<DamageModifier>> getAttackModifiers(uint8_t modType);
+		std::vector<std::shared_ptr<DamageModifier>> getDefenseModifiers(uint8_t modType);
+
+		std::vector<std::pair<uint8_t, uint8_t>> getAttackModifierTotals(const CombatType_t damageType, const CombatOrigin originType, const std::string& monsterName, const uint8_t race, const bool isBoss);
+		std::vector<std::pair<uint8_t, uint8_t>> getDefenseModifierTotals(const CombatType_t damageType, const CombatOrigin originType, const std::string& monsterName, const uint8_t race, const bool isBoss);
+
+		std::vector<std::pair<uint8_t, uint8_t>> getConversionTotals(const CombatType_t damageType, const CombatOrigin originType);
+		std::vector<std::pair<uint8_t, uint8_t>> getReformTotals(const CombatType_t damageType, const CombatOrigin originType);
+
+		void addAugment(std::shared_ptr<Augment>& augment);
+		void removeAugment(std::shared_ptr<Augment>& augment);
+		void reflectDamage(Creature& target, CombatType_t dmgType, uint8_t amount);
+		void deflectDamage(const CombatType_t dmgType, const uint8_t amount); /* future feature, add configurable target ammounts via modifier.aux_attribute */
+		void ricochetDamage(const CombatType_t dmgType, const uint8_t amount); /* future feature, add configurable target ammounts via modifier.aux_attribute */
 
 	private:
 		std::forward_list<Condition*> getMuteConditions() const;
@@ -1239,6 +1258,8 @@ class Player final : public Creature, public Cylinder
 		std::map<uint8_t, OpenContainer> openContainers;
 		std::map<uint32_t, DepotChest*> depotChests;
 		std::map<uint32_t, int32_t> storageMap;
+
+		std::vector<std::shared_ptr<Augment>> augments;
 
 		std::vector<OutfitEntry> outfits;
 		GuildWarVector guildWarVector;

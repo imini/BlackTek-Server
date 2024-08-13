@@ -12,27 +12,33 @@ workspace "Black-Tek-Server"
       objdir      "build/%{cfg.buildcfg}/obj"
       location    ""
       files { "src/**.cpp", "src/**.h" }
-      flags {"LinkTimeOptimization", "MultiProcessorCompile"}
+      flags {"MultiProcessorCompile"}
       enableunitybuild "On"
       intrinsics   "On"
 
       filter "configurations:Debug"
          defines { "DEBUG" }
+         runtime "Debug"
          symbols "On"
          optimize "Debug"
       filter {}
 
       filter "configurations:Release"
          defines { "NDEBUG" }
-         symbols "On"
-         optimize "Speed"
+         runtime "Release"
+         symbols "Off"
+         editandcontinue "Off"
+         flags {"LinkTimeOptimization", "NoIncrementalLink"}
+         optimize "Full"
       filter {}
 	  
       filter "platforms:64"
          architecture "x86_64"
+      filter {}
 
       filter "platforms:ARM64"
          architecture "ARM64"
+      filter {}
 
       filter "system:not windows"
          buildoptions { "-Wall", "-Wextra", "-pedantic", "-pipe", "-fvisibility=hidden", "-Wno-unused-local-typedefs" }
@@ -42,9 +48,9 @@ workspace "Black-Tek-Server"
       filter "system:windows"
          openmp "On"
          characterset "MBCS"
-         debugformat "c7"
          linkoptions {"/IGNORE:4099"}
          vsprops { VcpkgEnableManifest = "true" }
+         symbolspath '$(OutDir)$(TargetName).pdb'
       filter {}
 
       filter "architecture:amd64"

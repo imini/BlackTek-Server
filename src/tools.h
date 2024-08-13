@@ -90,6 +90,76 @@ int64_t OTSYS_TIME();
 
 SpellGroup_t stringToSpellGroup(const std::string& value);
 
+static uint8_t getCombatU8Value(CombatType_t combatType)
+{
+	switch (combatType) {
+	case COMBAT_NONE:
+		return 0;
+	case COMBAT_PHYSICALDAMAGE:
+		return 1;
+	case COMBAT_ENERGYDAMAGE:
+		return 2;
+	case COMBAT_EARTHDAMAGE:
+		return 3;
+	case COMBAT_FIREDAMAGE:
+		return 4;
+	case COMBAT_UNDEFINEDDAMAGE:
+		return 5;
+	case COMBAT_LIFEDRAIN:
+		return 6;
+	case COMBAT_MANADRAIN:
+		return 7;
+	case COMBAT_HEALING:
+		return 8;
+	case COMBAT_DROWNDAMAGE:
+		return 9;
+	case COMBAT_ICEDAMAGE:
+		return 10;
+	case COMBAT_HOLYDAMAGE:
+		return 11;
+	case COMBAT_DEATHDAMAGE:
+		return 12;
+	default:
+		std::cout << "Invalid Damage Conversion\n";
+	}
+	return 0;
+}
+
+static CombatType_t getCombatTypeFromU8(uint8_t value)
+{
+	switch (value) {
+	case 0:
+		return COMBAT_NONE;
+	case 1:
+		return COMBAT_PHYSICALDAMAGE;
+	case 2:
+		return COMBAT_ENERGYDAMAGE;
+	case 3:
+		return COMBAT_EARTHDAMAGE;
+	case 4:
+		return COMBAT_FIREDAMAGE;
+	case 5:
+		return COMBAT_UNDEFINEDDAMAGE;
+	case 6:
+		return COMBAT_LIFEDRAIN;
+	case 7:
+		return COMBAT_MANADRAIN;
+	case 8:
+		return COMBAT_HEALING;
+	case 9:
+		return COMBAT_DROWNDAMAGE;
+	case 10:
+		return COMBAT_ICEDAMAGE;
+	case 11:
+		return COMBAT_HOLYDAMAGE;
+	case 12:
+		return COMBAT_DEATHDAMAGE;
+	default:
+		std::cout << "Invalid u8 value for CombatType_t conversion\n";
+	}
+	return COMBAT_NONE;
+}
+
 namespace Titan {
 
 #if __has_cpp_attribute(__cpp_lib_to_underlying)

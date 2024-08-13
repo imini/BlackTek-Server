@@ -795,53 +795,264 @@ void Combat::doTargetCombat(Creature* caster, Creature* target, CombatDamage& da
 	}
 
 	Player* casterPlayer = caster ? caster->getPlayer() : nullptr;
+	Player* targetPlayer = target ? target->getPlayer() : nullptr;
+	Monster* casterMonster = caster ? caster->getMonster() : nullptr;
+	Monster* targetMonster = target ? target->getMonster() : nullptr;
 
 	bool success = false;
-	if (damage.primary.type != COMBAT_MANADRAIN) {
+
+	auto attackModData = std::vector<std::pair<uint8_t, uint8_t>>(Augments::AttackModCount);
+	auto defenseModData = std::vector<std::pair<uint8_t, uint8_t>>(Augments::DefenseModCount);
+	
+	if (casterPlayer) {
+		// instead of using this one method to call all that data, split this up by monsters and players
+		// I can optimize getAttackModifierTotals usage in code by having it return a struct with a third parameter being the modifier type.
+		attackModData = casterPlayer->getAttackModifierTotals(damage.primary.type, params.origin, target->getName(), target->getRace(), target->isBoss());
+		/// we do conversion here incase someone wants to convert say healing to mana or mana to death.
+
+		if (damage.primary.type != COMBAT_MANADRAIN && damage.primary.type != COMBAT_HEALING) {
+
+			auto& [piercingPercentTotal, piercingFlatTotal] = attackModData[ATTACK_MODIFIER_PIERCING];
+			// we handle piercing ourselves so that we can exit this call stack early
+			// in the case that all the damage was converted to piercing
+			if (piercingPercentTotal || piercingFlatTotal) {
+				auto piercingDamage = 0;
+				if (piercingPercentTotal) {
+					if(piercingPercentTotal <= 100) {
+						const auto difference = damage.primary.value * (piercingPercentTotal / 100.0);
+						piercingDamage += difference;
+						damage.primary.value -= difference;
+					} else {
+						piercingDamage += damage.primary.value;
+						damage.primary.value = 0;
+					}
+				}
+
+				if (piercingFlatTotal) {
+					if (piercingFlatTotal <= damage.primary.value) {
+						piercingDamage += piercingFlatTotal;
+					} else {
+						piercingDamage += damage.primary.value;
+						damage.primary.value = 0;
+					}
+				}
+
+				if (piercingDamage) {
+					CombatDamage piercing;
+					piercing.origin = ORIGIN_AUGMENT;
+					piercing.primary.value = piercingDamage;
+					piercing.primary.type = COMBAT_UNDEFINEDDAMAGE;
+					g_game.combatChangeHealth(caster, target, piercing);
+				}
+				// we return early incase all the damage is piercing now. 
+				// please note, due to this nature of piercing damage,
+				// piercing only interacts with conversion
+				// and does not interact with any of the other modifiers.
+				// in future rewrites of healthchange, lets allow piercing
+				// damage to also interact with other modifiers.
+				if (damage.primary.value == 0) {
+					return;
+				}
+			}
+
+			if (targetMonster) {
+
+				// To-Do: Make the getTotals methods return an array of these intead.
+				struct MonsterModifier {
+					uint8_t type;
+					uint8_t percent;
+					uint8_t flat;
+				};
+
+				std::array<MonsterModifier, 4> monsterMods = { {
+					{ATTACK_MODIFIER_BUTCHER, attackModData[ATTACK_MODIFIER_BUTCHER].first, attackModData[ATTACK_MODIFIER_BUTCHER].second},
+					{ATTACK_MODIFIER_HUNTER, attackModData[ATTACK_MODIFIER_HUNTER].first, attackModData[ATTACK_MODIFIER_HUNTER].second},
+					{ATTACK_MODIFIER_SLAYER, attackModData[ATTACK_MODIFIER_SLAYER].first, attackModData[ATTACK_MODIFIER_SLAYER].second},
+					{ATTACK_MODIFIER_CULL, attackModData[ATTACK_MODIFIER_CULL].first, attackModData[ATTACK_MODIFIER_CULL].second},
+				} };
+
+				for (const auto& [modkind, percent, flat] : monsterMods) {
+					if (percent | flat) {
+						applyDamageIncreaseModifier(modkind, damage, percent, flat);
+					}
+				}
+			}
+
+			// All damage modifiers besides Critical are applied before armor/defense calculations.
+			if (g_game.combatBlockHit(damage, caster, target, params.blockedByShield, params.blockedByArmor, params.itemId != 0, params.ignoreResistances)) {
+				// if the damage is blocked return early
+				return;
+			}
+			
+			if (!damage.critical && damage.origin != ORIGIN_CONDITION) {
+
+				auto& [augmentCritPercentTotals, augmentCritFlatTotals] = attackModData[ATTACK_MODIFIER_CRITICAL];
+				
+				// normal crits are the old ones and are percent based
+				auto normalCritChance = casterPlayer->getSpecialSkill(SPECIALSKILL_CRITICALHITCHANCE);
+				auto normalCritDamage = casterPlayer->getSpecialSkill(SPECIALSKILL_CRITICALHITAMOUNT);
+
+				// we do percent based crits first, so that the flat damage doesn't add to the percent increase.
+				if (normalCritChance > 0 && normalCritDamage > 0 && normal_random(1, 100) <= normalCritChance) {
+					auto damageIncrease = std::round(damage.primary.value * ((normalCritDamage + augmentCritPercentTotals) / 100.0));
+					damage.primary.value += damageIncrease;
+					damage.secondary.value += damageIncrease;
+					damage.critical = true;
+				}
+
+				if (augmentCritFlatTotals) {
+					damage.primary.value += augmentCritFlatTotals;
+					damage.secondary.value += augmentCritFlatTotals;
+					damage.critical = true;
+				}
+			}
+
+			if (targetPlayer && casterPlayer != targetPlayer) {
+
+				auto defenseModData = targetPlayer->getDefenseModifierTotals(damage.primary.type, params.origin, target->getName(), target->getRace(), target->isBoss());
+
+				auto& [absorbPercentTotal, absorbFlatTotal] = defenseModData[DEFENSE_MODIFIER_ABSORB];
+				auto& [restorePercentTotal, restoreFlatTotal] = defenseModData[DEFENSE_MODIFIER_RESTORE];
+				auto& [replenishPercentTotal, replenishFlatTotal] = defenseModData[DEFENSE_MODIFIER_REPLENISH];
+				auto& [revivePercentTotal, reviveFlatTotal] = defenseModData[DEFENSE_MODIFIER_REVIVE];
+				auto& [reflectPercentTotal, reflectFlatTotal] = defenseModData[DEFENSE_MODIFIER_REFLECT];
+				auto& [deflectPercentTotal, deflectFlatTotal] = defenseModData[DEFENSE_MODIFIER_DEFLECT];
+				auto& [ricochetPercentTotal, ricochetFlatTotal] = defenseModData[DEFENSE_MODIFIER_RICOCHET];
+				auto& [resistPercentTotal, resistFlatTotal] = defenseModData[DEFENSE_MODIFIER_RESIST];
+
+				// To-do : We are passing creatures and players around by pointers right now
+				// we need to convert to using references on both players and creatures.
+				if (absorbPercentTotal || absorbFlatTotal) {
+					// we use *targetPlayer->getPlayer() instead of *targetPlayer as to not use a dereferenced pointer later.
+					applyDamageReductionModifier(DEFENSE_MODIFIER_ABSORB, damage, *targetPlayer->getPlayer(), *caster->getCreature(), absorbPercentTotal, absorbFlatTotal);
+				}
+
+				if (restorePercentTotal || restoreFlatTotal) {
+					applyDamageReductionModifier(DEFENSE_MODIFIER_RESTORE, damage, *targetPlayer->getPlayer(), *caster->getCreature(), restorePercentTotal, restoreFlatTotal);
+				}
+
+				if (replenishPercentTotal || replenishFlatTotal) {
+					applyDamageReductionModifier(DEFENSE_MODIFIER_REPLENISH, damage, *targetPlayer->getPlayer(), *caster->getCreature(), replenishPercentTotal, replenishFlatTotal);
+				}
+
+				if (revivePercentTotal || reviveFlatTotal) {
+					applyDamageReductionModifier(DEFENSE_MODIFIER_REVIVE, damage, *targetPlayer->getPlayer(), *caster->getCreature(), revivePercentTotal, reviveFlatTotal);
+				}
+
+				if (reflectPercentTotal || reflectFlatTotal) {
+					applyDamageReductionModifier(DEFENSE_MODIFIER_REFLECT, damage, *targetPlayer->getPlayer(), *caster->getCreature(), reflectPercentTotal, reflectFlatTotal);
+				}
+
+				if (deflectPercentTotal || deflectFlatTotal) {
+					applyDamageReductionModifier(DEFENSE_MODIFIER_DEFLECT, damage, *targetPlayer->getPlayer(), *caster->getCreature(), deflectPercentTotal, deflectFlatTotal);
+				}
+
+				if (ricochetPercentTotal || ricochetFlatTotal) {
+					applyDamageReductionModifier(DEFENSE_MODIFIER_RICOCHET, damage, *targetPlayer->getPlayer(), *caster->getCreature(), ricochetPercentTotal, ricochetFlatTotal);
+				}
+
+				if (resistPercentTotal || resistFlatTotal) {
+					applyDamageReductionModifier(DEFENSE_MODIFIER_RESIST, damage, *targetPlayer->getPlayer(), *caster->getCreature(), resistPercentTotal, resistFlatTotal);
+				}
+			}
+		} 
+	} else if (casterMonster) {
 		if (g_game.combatBlockHit(damage, caster, target, params.blockedByShield, params.blockedByArmor, params.itemId != 0, params.ignoreResistances)) {
 			return;
 		}
 
-		if (casterPlayer) {
-			Player* targetPlayer = target ? target->getPlayer() : nullptr;
-			if (targetPlayer && casterPlayer != targetPlayer && targetPlayer->getSkull() != SKULL_BLACK && damage.primary.type != COMBAT_HEALING) {
-				damage.primary.value /= 2;
-				damage.secondary.value /= 2;
+		if (targetPlayer) {
+			defenseModData = targetPlayer->getDefenseModifierTotals(damage.primary.type, params.origin, target->getName(), target->getRace(), target->isBoss());
+
+			auto& [absorbPercentTotal, absorbFlatTotal] = defenseModData[DEFENSE_MODIFIER_ABSORB];
+			auto& [restorePercentTotal, restoreFlatTotal] = defenseModData[DEFENSE_MODIFIER_RESTORE];
+			auto& [replenishPercentTotal, replenishFlatTotal] = defenseModData[DEFENSE_MODIFIER_REPLENISH];
+			auto& [revivePercentTotal, reviveFlatTotal] = defenseModData[DEFENSE_MODIFIER_REVIVE];
+			auto& [reflectPercentTotal, reflectFlatTotal] = defenseModData[DEFENSE_MODIFIER_REFLECT];
+			auto& [deflectPercentTotal, deflectFlatTotal] = defenseModData[DEFENSE_MODIFIER_DEFLECT];
+			auto& [ricochetPercentTotal, ricochetFlatTotal] = defenseModData[DEFENSE_MODIFIER_RICOCHET];
+			auto& [resistPercentTotal, resistFlatTotal] = defenseModData[DEFENSE_MODIFIER_RESIST];
+			auto& [beastArmorPercentTotal, beastArmorFlatTotal] = defenseModData[DEFENSE_MODIFIER_BEASTARMOR];
+			auto& [aegisPercentTotal, aegisFlatTotal] = defenseModData[DEFENSE_MODIFIER_AEGIS];
+			auto& [immortalPercentTotal, immortalFlatTotal] = defenseModData[DEFENSE_MODIFIER_IMMORTAL];
+			auto& [slayerPercentTotal, slayerFlatTotal] = defenseModData[DEFENSE_MODIFIER_SLAYER];
+
+			// To-do : We are passing creatures and players around by pointers right now
+			// we need to convert to using references on both players and creatures.
+			if (absorbPercentTotal || absorbFlatTotal) {
+				// we use *targetPlayer->getPlayer() instead of *targetPlayer as to not use a dereferenced pointer later.
+				// not entirely sure the above statement is true. I think its false actually, because its the same pointer?
+				// if it so happens I am causing dereference, solution is to have the method return the player when its done.
+				applyDamageReductionModifier(DEFENSE_MODIFIER_ABSORB, damage, *targetPlayer->getPlayer(), *caster->getCreature(), absorbPercentTotal, absorbFlatTotal);
 			}
 
-			if (!damage.critical && damage.primary.type != COMBAT_HEALING && damage.origin != ORIGIN_CONDITION) {
-				uint16_t chance = casterPlayer->getSpecialSkill(SPECIALSKILL_CRITICALHITCHANCE);
-				uint16_t skill = casterPlayer->getSpecialSkill(SPECIALSKILL_CRITICALHITAMOUNT);
-				if (chance > 0 && skill > 0 && normal_random(1, 100) <= chance) {
-					damage.primary.value += std::round(damage.primary.value * (skill / 100.));
-					damage.secondary.value += std::round(damage.secondary.value * (skill / 100.));
-					damage.critical = true;
-				}
+			if (restorePercentTotal || restoreFlatTotal) {
+				applyDamageReductionModifier(DEFENSE_MODIFIER_RESTORE, damage, *targetPlayer->getPlayer(), *caster->getCreature(), restorePercentTotal, restoreFlatTotal);
+			}
+
+			if (replenishPercentTotal || replenishFlatTotal) {
+				applyDamageReductionModifier(DEFENSE_MODIFIER_REPLENISH, damage, *targetPlayer->getPlayer(), *caster->getCreature(), replenishPercentTotal, replenishFlatTotal);
+			}
+
+			if (revivePercentTotal || reviveFlatTotal) {
+				applyDamageReductionModifier(DEFENSE_MODIFIER_REVIVE, damage, *targetPlayer->getPlayer(), *caster->getCreature(), revivePercentTotal, reviveFlatTotal);
+			}
+
+			if (reflectPercentTotal || reflectFlatTotal) {
+				applyDamageReductionModifier(DEFENSE_MODIFIER_REFLECT, damage, *targetPlayer->getPlayer(), *caster->getCreature(), reflectPercentTotal, reflectFlatTotal);
+			}
+
+			if (deflectPercentTotal || deflectFlatTotal) {
+				applyDamageReductionModifier(DEFENSE_MODIFIER_DEFLECT, damage, *targetPlayer->getPlayer(), *caster->getCreature(), deflectPercentTotal, deflectFlatTotal);
+			}
+
+			if (ricochetPercentTotal || ricochetFlatTotal) {
+				applyDamageReductionModifier(DEFENSE_MODIFIER_RICOCHET, damage, *targetPlayer->getPlayer(), *caster->getCreature(), ricochetPercentTotal, ricochetFlatTotal);
+			}
+
+			if (resistPercentTotal || resistFlatTotal) {
+				applyDamageReductionModifier(DEFENSE_MODIFIER_RESIST, damage, *targetPlayer->getPlayer(), *caster->getCreature(), resistPercentTotal, resistFlatTotal);
+			}
+
+			if (beastArmorPercentTotal || beastArmorFlatTotal) {
+				applyDamageReductionModifier(DEFENSE_MODIFIER_BEASTARMOR, damage, *targetPlayer->getPlayer(), *caster->getCreature(), beastArmorPercentTotal, beastArmorFlatTotal);
+			}
+
+			if (aegisPercentTotal || aegisFlatTotal) {
+				applyDamageReductionModifier(DEFENSE_MODIFIER_AEGIS, damage, *targetPlayer->getPlayer(), *caster->getCreature(), aegisPercentTotal, aegisFlatTotal);
+			}
+
+			if (immortalPercentTotal || immortalFlatTotal) {
+				applyDamageReductionModifier(DEFENSE_MODIFIER_IMMORTAL, damage, *targetPlayer->getPlayer(), *caster->getCreature(), immortalPercentTotal, immortalFlatTotal);
+			}
+
+			if (slayerPercentTotal || slayerFlatTotal) {
+				applyDamageReductionModifier(DEFENSE_MODIFIER_SLAYER, damage, *targetPlayer->getPlayer(), *caster->getCreature(), slayerPercentTotal, slayerFlatTotal);
 			}
 		}
+	}
 
-		success = g_game.combatChangeHealth(caster, target, damage);
-	} else {
+	if (damage.primary.type == COMBAT_MANADRAIN) {
 		success = g_game.combatChangeMana(caster, target, damage);
+	} else {
+		success = g_game.combatChangeHealth(caster, target, damage);
 	}
 
 	if (success) {
-		if (damage.blockType == BLOCK_NONE || damage.blockType == BLOCK_ARMOR) {
-			for (const auto& condition : params.conditionList) {
-				if (caster == target || !target->isImmune(condition->getType())) {
-					Condition* conditionCopy = condition->clone();
-					if (caster) {
-						conditionCopy->setParam(CONDITION_PARAM_OWNER, caster->getID());
-					}
-
-					//TODO: infight condition until all aggressive conditions has ended
-					target->addCombatCondition(conditionCopy);
-				}
-			}
-		}
 
 		if (damage.critical) {
 			g_game.addMagicEffect(target->getPosition(), CONST_ME_CRITICAL_DAMAGE);
+		}
+
+		for (const auto& condition : params.conditionList) {
+			if (!target->isImmune(condition->getType())) {
+				Condition* conditionCopy = condition->clone();
+				if (caster) {
+					conditionCopy->setParam(CONDITION_PARAM_OWNER, caster->getID());
+				}
+				//TODO: infight condition until all aggressive conditions has ended
+				target->addCombatCondition(conditionCopy);
+			}
 		}
 
 		if (!damage.leeched && damage.primary.type != COMBAT_HEALING && casterPlayer && damage.origin != ORIGIN_CONDITION) {
@@ -849,30 +1060,109 @@ void Combat::doTargetCombat(Creature* caster, Creature* target, CombatDamage& da
 			leechCombat.origin = ORIGIN_NONE;
 			leechCombat.leeched = true;
 
-			int32_t totalDamage = std::abs(damage.primary.value + damage.secondary.value);
+			auto totalDamage = std::abs(damage.primary.value + damage.secondary.value);
 
 			if (casterPlayer->getHealth() < casterPlayer->getMaxHealth()) {
-				uint16_t chance = casterPlayer->getSpecialSkill(SPECIALSKILL_LIFELEECHCHANCE);
-				uint16_t skill = casterPlayer->getSpecialSkill(SPECIALSKILL_LIFELEECHAMOUNT);
-				if (chance > 0 && skill > 0 && normal_random(1, 100) <= chance) {
-					leechCombat.primary.value = std::round(totalDamage * (skill / 100.));
+
+				auto& [lifeStealPercentTotal, lifeStealFlatTotal] = attackModData[ATTACK_MODIFIER_LIFESTEAL];
+
+				auto lifeLeechChance = casterPlayer->getSpecialSkill(SPECIALSKILL_LIFELEECHCHANCE);
+				auto lifeLeechAmount = casterPlayer->getSpecialSkill(SPECIALSKILL_LIFELEECHAMOUNT);
+				auto totalGain = 0;
+
+				if (lifeLeechChance > 0 && lifeLeechAmount > 0 && normal_random(1, 100) <= lifeLeechChance) {
+					if (lifeStealPercentTotal) {
+						totalGain += std::round(totalDamage * ((lifeLeechAmount + lifeStealPercentTotal) / 100.0));
+					} else {
+						totalGain += std::round(totalDamage * (lifeLeechAmount / 100.0));
+					}
+				}
+
+				if (lifeStealFlatTotal) {
+					totalGain += lifeStealFlatTotal;
+				}
+
+				if (totalGain) {
+					leechCombat.primary.value = totalGain;
 					g_game.combatChangeHealth(nullptr, casterPlayer, leechCombat);
 					casterPlayer->sendMagicEffect(casterPlayer->getPosition(), CONST_ME_MAGIC_RED);
 				}
+
 			}
 
+			/// ATTACK_MODIFIER_MANASTEAL
 			if (casterPlayer->getMana() < casterPlayer->getMaxMana()) {
-				uint16_t chance = casterPlayer->getSpecialSkill(SPECIALSKILL_MANALEECHCHANCE);
-				uint16_t skill = casterPlayer->getSpecialSkill(SPECIALSKILL_MANALEECHAMOUNT);
-				if (chance > 0 && skill > 0 && normal_random(1, 100) <= chance) {
-					leechCombat.primary.value = std::round(totalDamage * (skill / 100.));
+
+				auto& [manaStealPercentTotal, manaStealFlatTotal] = attackModData[ATTACK_MODIFIER_LIFESTEAL];
+
+				auto manaLeechChance = casterPlayer->getSpecialSkill(SPECIALSKILL_MANALEECHCHANCE);
+				auto manaLeechAmount = casterPlayer->getSpecialSkill(SPECIALSKILL_MANALEECHAMOUNT);
+				auto totalGain = 0;
+
+				if (manaLeechChance > 0 && manaLeechAmount > 0 && normal_random(1, 100) <= manaLeechChance) {
+					if (manaStealPercentTotal) {
+						totalGain += std::round(totalDamage * ((manaLeechAmount + manaStealPercentTotal) / 100.0));
+					} else {
+						totalGain += std::round(totalDamage * (manaLeechAmount / 100.0));
+					}
+				}
+
+				if (manaStealFlatTotal) {
+					totalGain += manaStealFlatTotal;
+				}
+
+				if (totalGain) {
+					leechCombat.primary.value = totalGain;
 					g_game.combatChangeMana(nullptr, casterPlayer, leechCombat);
 					casterPlayer->sendMagicEffect(casterPlayer->getPosition(), CONST_ME_MAGIC_BLUE);
 				}
+
+			}
+
+			/// ATTACK_MODIFIER_STAMINASTEAL
+			// To-do: move 2520 into a global constexpr
+			// or even better, make it have a real max var.
+			if (casterPlayer->getStaminaMinutes() < 2520) {
+				auto& [staminaStealPercentTotal, staminaStealFlatTotal] = attackModData[ATTACK_MODIFIER_STAMINASTEAL];
+
+				auto totalGain = 0;
+
+				if (staminaStealPercentTotal) {
+					totalGain += std::round(totalDamage * (staminaStealPercentTotal / 100.0));
+				}
+
+				if (staminaStealFlatTotal) {
+					totalGain += staminaStealFlatTotal;
+				}
+
+				if (totalGain) {
+					casterPlayer->changeStamina(totalGain);
+				}
+
+			}
+		
+			/// ATTACK_MODIFIER_SOULSTEAL
+			if (casterPlayer->getSoul() < casterPlayer->getVocation()->getSoulMax()) {
+				auto& [soulStealPercentTotal, soulStealFlatTotal] = attackModData[ATTACK_MODIFIER_SOULSTEAL];
+
+				auto totalGain = 0;
+
+				if (soulStealPercentTotal) {
+					totalGain += std::round(totalDamage * (soulStealPercentTotal / 100.0));
+				}
+
+				if (soulStealFlatTotal) {
+					totalGain += soulStealFlatTotal;
+				}
+
+				if (totalGain) {
+					casterPlayer->changeSoul(totalGain);
+				}
+
 			}
 		}
 
-		if (params.dispelType == CONDITION_PARALYZE) {
+		if (params.dispelType && CONDITION_PARALYZE) {
 			target->removeCondition(CONDITION_PARALYZE);
 		} else {
 			target->removeCombatCondition(params.dispelType);
@@ -1043,6 +1333,76 @@ void Combat::doAreaCombat(Creature* caster, const Position& position, const Area
 
 		if (params.targetCallback) {
 			params.targetCallback->onTargetCombat(caster, creature);
+		}
+	}
+}
+
+
+void Combat::applyDamageIncreaseModifier(uint8_t modifierType, CombatDamage& damage, uint8_t percentValue, uint8_t flatValue) {
+
+	if (percentValue) {
+		if (percentValue <= 100) {
+			damage.primary.value += damage.primary.value * (percentValue / 100.0);
+		} else {
+			damage.primary.value *= 2;
+		}
+	}
+	if (percentValue) {
+		damage.primary.value += percentValue;
+	}
+
+}
+
+void Combat::applyDamageReductionModifier(uint8_t modifierType, CombatDamage& damage, Player& damageTarget, Creature& attacker, uint8_t percentValue, uint8_t flatValue) {
+	auto damageChange = 0;
+	if (percentValue) {
+		if (percentValue <= 100) {
+			damageChange += damage.primary.value * (percentValue / 100.0);
+		} else {
+			damageChange += damage.primary.value * 2;
+		}
+	}
+	if (flatValue) {
+		damageChange += flatValue;
+	}
+	if (damageChange) {
+		damage.primary.value -= damageChange;
+
+		switch (modifierType) {
+		case DEFENSE_MODIFIER_ABSORB:
+			damageTarget.gainHealth(nullptr, damageChange);
+			return;
+
+		case DEFENSE_MODIFIER_RESTORE:
+			damageTarget.changeMana(damageChange);
+			return;
+
+		case DEFENSE_MODIFIER_REPLENISH:
+			damageTarget.changeStamina(damageChange);
+			return;
+
+		case DEFENSE_MODIFIER_REVIVE:
+			damageTarget.changeSoul(damageChange);
+			return;
+
+		case DEFENSE_MODIFIER_REFLECT:
+			damageTarget.reflectDamage(attacker, damage.primary.type, damageChange);
+			return;
+
+		case DEFENSE_MODIFIER_DEFLECT:
+			damageTarget.deflectDamage(damage.primary.type, damageChange);
+			return;
+
+		case DEFENSE_MODIFIER_RICOCHET:
+			damageTarget.ricochetDamage(damage.primary.type, damageChange);
+			return;
+
+		case DEFENSE_MODIFIER_REFORM:
+			// To-do
+			return;
+
+		default:
+			return;
 		}
 	}
 }
